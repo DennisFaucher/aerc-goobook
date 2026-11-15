@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+#
+# aerc-goobook -- use your Google Contacts as aerc's address book.
+#
+# aerc runs the configured command with %s replaced by whatever you typed
+# after the last comma, then expects one match per line on stdout, each line
+# tab-delimited with the e-mail address first and the contact name (optional)
+# second. Contacts are read from Google through goobook.
+#
+# One-time setup:
+#   pipx install goobook
+#   goobook authenticate -- client_secrets.json
+#
+# Usage:
+#   aerc-goobook <query>    # print "email<TAB>name" lines for aerc
+#   aerc-goobook --reload   # force a refresh of the goobook cache
+#   aerc-goobook --help
+
+set -uo pipefail
+
+GOOBOOK="${GOOBOOK:-goobook}"
+
+# Escape POSIX/GNU regex metacharacters so the typed text is matched literally.
+# Spaces are left untouched on purpose: goobook turns them into ".*" itself.
+escape_regex() {
+	printf '%s' "$1" | sed -e 's/[][\\.^$*+?(){}|]/\\&/g'
+}
+
+# Normalise goobook's "mutt format" output into aerc's tab-delimited format.
+#
+# goobook prints a leading blank line (mutt discards it), then either:
+#   email<TAB>Name<TAB>kind groups: "..."
+# or, for a contact group:
+#   Name <email>, Name <email><TAB>Group (group)
+#
+# aerc wants plain:
+#   email<TAB>Name
+format_completions() {
+	awk -F '\t' -v OFS='\t' '
+		NF == 0 { next }
+		$2 ~ /\(group\)$/ && $1 ~ /</ {
+			n = split($1, parts, ", ")
+			for (i = 1; i <= n; i++) {
+				if (match(parts[i], /<[^>]+>/)) {
+					email = substr(parts[i], RSTART + 1, RLENGTH - 2)
+					name  = substr(parts[i], 1, RSTART - 1)
+					sub(/[[:space:]]+$/, "", name)
+					print email, name
+				}
+			}
+			next
+		}
+		NF >= 1 { print $1, $2 }
+	'
+}
+
+reload_cache() {
+	"$GOOBOOK" reload
+}
+
+main() {
+	case "${1:-}" in
+		-h | --help)
+			sed -n '2,18p' "$0" | cut -c 3-
+			return 0
+			;;
+		--reload)
+			reload_cache
+			return $?
+			;;
+	esac
+
+	if ! command -v "$GOOBOOK" >/dev/null 2>&1; then
+		printf 'aerc-goobook: %s not found on PATH\n' "$GOOBOOK" >&2
+		return 1
+	fi
+
+	local query escaped
+	query="$*"
+	escaped=$(escape_regex "$query")
+
+	"$GOOBOOK" query "$escaped" 2>/dev/null | format_completions
+}
+
+main "$@"
